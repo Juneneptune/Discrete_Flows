@@ -11,7 +11,7 @@ https://github.com/TrentBrick/PyTorchDiscreteFlows/tree/master/discrete_flows co
 The code also had issues of using past versions of PyTorch functions (e.i. `torch.fft.fft()`) that were no longer compatible with the new version. Therefore, the version was downgraded to PyTorch 1.7.1. Moreover, the notebook had a `git` command line that directly downloaded the github repository `!git clone https://github.com/TrentBrick/PyTorchDiscreteFlows.git`.
 
 ## Running Experiment Code
-To run the code, all codes in these sections must be run in these respective order:
+To run the code, all codes in these sections must be run in these respective order (Fundamental Test section can be ignored):
 - Setup
 - Modified Discrete Bipartite Flow Model
   - Our modified DiscreteBipartiteFlow class.
