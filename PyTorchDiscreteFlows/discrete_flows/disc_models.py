@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from . import disc_utils
+from PyTorchDiscreteFlows.discrete_flows import disc_utils
 
 class DiscreteAutoFlowModel(nn.Module):
     # combines all of the discrete flow layers into a single model
@@ -221,6 +221,7 @@ class DiscreteAutoregressiveFlow(nn.Module):
     def log_det_jacobian(self, inputs):
         return torch.zeros((1)).type(inputs.dtype)
 
+
 # Discrete Bipartite Flow
 class DiscreteBipartiteFlow(nn.Module):
     """A discrete reversible layer.
@@ -256,7 +257,7 @@ class DiscreteBipartiteFlow(nn.Module):
     [prime fields](https://en.wikipedia.org/wiki/Finite_field)).
     """
 
-    def __init__(self, layer, parity, temperature, vocab_size, dim, embedding=False):
+    def __init__(self, layer, parity, temperature, vocab_size, dim, isimage=False, scale_opt=False):
         """Constructs flow.
         Args:
         layer: Two-headed masked network taking the inputs and returning a
@@ -270,74 +271,117 @@ class DiscreteBipartiteFlow(nn.Module):
         """
         super().__init__()
         self.layer = layer
-        self.parity = parity # going to do a block split. #torch.tensor(mask).float()
+        self.parity = parity  # going to do a block split. #torch.tensor(mask).float()
         self.temperature = temperature
         self.vocab_size = vocab_size
-        self.dim = dim # total dimension of the vector being dealt with. 
-        self.embedding = embedding
+        self.dim = dim  # Used if a convolutional layer is need for images
+        self.scale_opt = scale_opt
+        self.isimage = isimage
 
     def reverse(self, inputs, **kwargs):
         """reverse pass for bipartite data to latent."""
-        #TODO: implement even odd shuffling. 
-        
-        assert len(inputs.shape) ==2, 'need to flatten the inputs first!!!'
-        z0, z1 = inputs[:,:self.dim//2], inputs[:,self.dim//2:]
-        if self.parity:
-            z0, z1 = z1, z0
-        x0 = z0 
-        if self.embedding:
-            layer_outs = self.layer( torch.argmax(x0,dim=1).long() , **kwargs)
-        else: 
-            layer_outs = self.layer(x0, **kwargs)
-        if layer_outs.shape[-1] == 2 * self.vocab_size: # have a location and scaling parameter
-            loc, scale = torch.split(layer_outs, self.vocab_size, dim=-1)
-            loc = disc_utils.one_hot_argmax(loc, self.temperature).type(inputs.dtype)
-            scale = disc_utils.one_hot_argmax(scale, self.temperature).type(inputs.dtype)
-            #print('the scale', scale.argmax(-1))
-            inverse_scale = disc_utils.multiplicative_inverse(scale, self.vocab_size)
-            shifted_inputs = disc_utils.one_hot_minus(z1, loc)
-            x1 = disc_utils.one_hot_multiply(shifted_inputs, inverse_scale)
+        # TODO: implement even odd shuffling.
 
-        elif layer_outs.shape[-1] == self.vocab_size:
-            loc = layer_outs
-            loc = disc_utils.one_hot_argmax(loc, self.temperature).type( inputs.dtype)
-            x1 = disc_utils.one_hot_minus(z1, loc)
+        # Remove Embedded and flatten
+        # Remove scale for now
+        # Flatten -> Hidden -> Relu -> Output (Loc)
+        z0, z1 = inputs[:, :inputs.shape[1] // 2].type(torch.float), inputs[:, inputs.shape[1] // 2:].type(
+            torch.float)  # dim is proportionally divided in preporcessing
+        # print(z0.shape)
+        if self.parity:
+            x0, x1 = z1, z0
         else:
-            raise ValueError('Output of layer does not have compatible dimensions.')
+            x0, x1 = z0, z1
+        # print(z0.view(z0.shape[0], -1).shape)
+        if self.isimage:
+            layer_out = self.layer(x0.view(x0.shape[0], x0.shape[1], x0.shape[2], -1))
+        else:
+            layer_out = self.layer(x0.view(x0.shape[0], -1))
+        # print(layer_out.shape)
+
+        loc, scale = torch.chunk(layer_out, 2, dim=1)
+        # print(loc.shape)
+        # Reshape both loc and scale
+        if self.isimage:
+            loc = loc.view(loc.shape[0], loc.shape[1], loc.shape[2], int(loc.shape[3] / self.vocab_size), -1)
+            scale = scale.view(scale.shape[0], scale.shape[1], scale.shape[2], int(scale.shape[3] / self.vocab_size),
+                               -1)
+        else:
+            loc = loc.view(loc.shape[0], int(loc.shape[-1] / self.vocab_size), -1)
+            scale = scale.view(scale.shape[0], int(scale.shape[-1] / self.vocab_size), -1)
+        # print(loc.shape)
+        # print(scale.shape)
+
+        loc = one_hot_argmax(loc, self.temperature).type(inputs.dtype)
+        # print(x1.shape)
+        if self.scale_opt:
+            scale = one_hot_argmax(scale, self.temperature).type(inputs.dtype)
+            inverse_scale = multiplicative_inverse(scale, self.vocab_size)
+            shifted_inputs = one_hot_minus(x1, loc)
+            x1 = one_hot_multiply(shifted_inputs, inverse_scale)
+        else:
+            x1 = one_hot_minus(x1, loc)
+
         if self.parity:
             x0, x1 = x1, x0
         x = torch.cat([x0, x1], dim=1)
+
         return x
 
     def forward(self, inputs, **kwargs):
-        """Reverse pass for the inverse bipartite transformation. From data to latent. """
-        assert len(inputs.shape) ==2, 'need to flatten the inputs first!'
-        x0, x1 = inputs[:,:self.dim//2], inputs[:,self.dim//2:]
-        if self.parity:
-            x0, x1 = x1, x0
-        z0 = x0 
-        if self.embedding:
-            layer_outs = self.layer( torch.argmax(z0,dim=1).long() , **kwargs)
-        else: 
-            layer_outs = self.layer(z0, **kwargs)
+        # Remove Embedded and flatten
+        # Remove scale for now
+        # Flatten -> Hidden -> Relu -> Output (Loc)
         # outputting loc and scale
-        if layer_outs.shape[-1] == 2 * self.vocab_size:
-            loc, scale = torch.split(layer_outs, self.vocab_size, dim=-1)
-            scale = disc_utils.one_hot_argmax(scale, self.temperature).type(inputs.dtype)
-            #print('the scale', scale)
-            scaled_inputs = disc_utils.one_hot_multiply(x1, scale)
-        # just outputting loc
-        elif layer_outs.shape[-1] == self.vocab_size:
-            loc = layer_outs
-            scaled_inputs = x1
+        # print(inputs.shape)
+        x0, x1 = inputs[:, :inputs.shape[1] // 2].type(torch.float), inputs[:, inputs.shape[1] // 2:].type(
+            torch.float)  # dim is proportionally divided in preporcessing
+        # print(x0.shape)
+        # print(x1.shape)
+        if self.parity:
+            z0, z1 = x1, x0
         else:
-            raise ValueError('Output of layer does not have compatible dimensions.')
-        loc = disc_utils.one_hot_argmax(loc, self.temperature).type(inputs.dtype)
-        z1 = disc_utils.one_hot_add(loc, scaled_inputs)
+            z0, z1 = x0, x1
+        # print(z0.view(z0.shape[0], -1).shape)
+        # print(z1.shape)
+        if self.isimage:
+            layer_out = self.layer(z0.view(z0.shape[0], z0.shape[1], z0.shape[2], -1))
+        else:
+            layer_out = self.layer(z0.view(z0.shape[0], -1))
+            # print(layer_out.shape)
+
+        # print(torch.nn.functional.one_hot(layer_out.type(torch.long), num_classes=self.vocab_size))
+        loc, scale = torch.chunk(layer_out, 2, dim=1)
+        # print(loc.shape)
+        # Reshape both loc and scale
+        if self.isimage:
+            loc = loc.view(loc.shape[0], loc.shape[1], loc.shape[2], int(loc.shape[3] / self.vocab_size), -1)
+            scale = scale.view(scale.shape[0], scale.shape[1], scale.shape[2], int(scale.shape[3] / self.vocab_size),
+                               -1)
+        else:
+            loc = loc.view(loc.shape[0], int(loc.shape[-1] / self.vocab_size), -1)
+            scale = scale.view(scale.shape[0], int(scale.shape[-1] / self.vocab_size), -1)
+
+        # print(loc.shape)
+        # print(scale.shape)
+
+        if self.scale_opt:
+            scale = one_hot_argmax(scale, self.temperature).type(inputs.dtype)
+            scaled_inputs = one_hot_multiply(z1, scale)
+        else:
+            scaled_inputs = z1
+        # print(loc.shape)
+        loc = one_hot_argmax(loc, self.temperature).type(inputs.dtype)
+        # print(loc.shape)
+        # print(scaled_inputs.shape)
+        z1 = one_hot_add(loc, scaled_inputs)
+        # print(z1.shape)
         if self.parity:
             z0, z1 = z1, z0
         z = torch.cat([z0, z1], dim=1)
+        # print(z.shape)
         return z
 
     def log_det_jacobian(self, inputs):
         return torch.zeros((1)).type(inputs.dtype)
+
