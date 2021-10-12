@@ -13,24 +13,28 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
+
 class MaskedLinear(nn.Linear):
     """ same as Linear except has a configurable mask on the weights """
-    
+
     def __init__(self, in_features, out_features, bias=True):
-        super().__init__(in_features, out_features, bias)        
-        self.register_buffer('mask', torch.ones(out_features, in_features)) # creates a mask that is actually just all ones?? 
-        
-    def set_mask(self, mask): # called when the masks are created. passes in this mask. 
-        #self.mask.data.copy_(torch.from_numpy(mask.astype(np.uint8).T)) 
-        #print('mask in set mask', mask, mask.shape)
-        mask = mask.long().T
-        self.mask.data.copy_(mask)
-        # if all of the inputs are zero, need to ensure the bias 
+        super().__init__(in_features, out_features, bias)
+        self.register_buffer('mask',
+                             torch.ones(out_features, in_features))  # creates a mask that is actually just all ones??
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    def set_mask(self, mask):  # called when the masks are created. passes in this mask.
+        # self.mask.data.copy_(torch.from_numpy(mask.astype(np.uint8).T))
+        # print('mask in set mask', mask, mask.shape)
+        mask = mask.long().T.to(self.device)
+        self.mask.data.copy_(mask).to(self.device)
+        # if all of the inputs are zero, need to ensure the bias
         # is zeroed out!
-        self.bias_all_zero_mask = (mask.sum(dim=1)!=0).float()
-        
+        self.bias_all_zero_mask = (mask.sum(dim=1) != 0).float().to(self.device)
+
     def forward(self, input):
         return F.linear(input, self.mask * self.weight, self.bias_all_zero_mask * self.bias)
+
 
 class MADE(nn.Module):
     """Masked autoencoder for distribution estimation (Germain et al., 2015).

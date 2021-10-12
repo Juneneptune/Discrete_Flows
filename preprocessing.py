@@ -5,6 +5,7 @@ import torchvision
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 from train_utils import *
+import tensorflow_datasets as tfds
 
 
 def binarize_digits():
@@ -30,7 +31,6 @@ def download_mnist():
     trainset = torchvision.datasets.MNIST(root='./data', train=True, download=True,
                                           transform=torchvision.transforms.Compose(
                                               [torchvision.transforms.ToTensor()]))
-
     label = torch.zeros(60000)
     data = torch.zeros((60000, 28, 28))
 
@@ -137,3 +137,60 @@ def Sample_Model(model, base_log_probs, vocab_size, disc_layer_type, sample_row=
   plt.gray()
   plt.show()
 
+
+def preprocess_binary_mnist():
+  train,test = tfds.load('binarized_mnist', split=['train', 'test'])
+  new_train = tfds.as_numpy(train)
+  new_test = tfds.as_numpy(test)
+  flattened_images = []
+  for i,ex in enumerate(new_train):
+    # `{'image': np.array(shape=(28, 28, 1)), 'labels': np.array(shape=())}`
+    flattened_images.append(ex['image'].flatten())
+  for i,ex in enumerate(new_test):
+    # `{'image': np.array(shape=(28, 28, 1)), 'labels': np.array(shape=())}`
+    flattened_images.append(ex['image'].flatten())
+  return np.array(flattened_images).astype(int)
+
+
+def Mai_kfold_splitter(n, k, fold_num, train_proportion):
+    if k != 1:  # for kfold = 1 just use the train_proportion to split
+        fold_size = n // k
+        test_inds = list(range(fold_num * fold_size, (fold_num + 1) * fold_size))
+        set1 = set(test_inds)
+        set2 = set(list(range(0, n)))
+        train_inds = list(set2 - set1)
+    else:
+        train_inds = list(range(0, round(n * train_proportion)))
+        test_inds = list(range(round(n * train_proportion), n))
+    return train_inds, test_inds
+
+
+def Mai_create_X_train_test(X, train_portion, kfolds, fold_num):
+    '''
+    If number of folds is 1, you need to specify the train_portion
+    '''
+    n, _ = X.shape
+
+    train_ind_perm, test_ind_perm = Mai_kfold_splitter(n, kfolds, fold_num, train_portion)
+
+    X_train = X[train_ind_perm, :]
+    X_test = X[test_ind_perm, :]
+
+    return X_train, X_test
+
+
+class DATA(Dataset):
+    def __init__(self, data):
+        self.data = data
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+def kfold_splitter(data,n,k,fold_num):
+    fold_size = n//k
+    test_data = data[fold_num*fold_size:(fold_num+1)*fold_size]
+    train_data = np.vstack((data[0:fold_num*fold_size], data[(fold_num+1)*fold_size:n]))
+    return train_data, test_data
